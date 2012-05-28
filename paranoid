@@ -1,0 +1,644 @@
+#!/usr/bin/env python
+
+import sys
+import re
+
+#TODO: 
+'''
+1. null values
+2. +=, <=
+'''
+
+if sys.version_info[0] >= 3:
+    raw_input = input
+
+class Paranoid:
+    indentStack = []
+    beginBlock = False
+    outsideFuncBuffer = ''
+    exprBuffer = ''
+    exprType = ''
+    blockVar = ''
+    paramBuffer = ''
+    idList = {} 
+    loops = [] 
+    outs = [] 
+    blockType = ''
+    conditionOperator = None
+    conditionVar = None
+    funccallBuffer = ''
+    insideFunc = False
+    params = []
+    funcBuffer = ''
+    perlFuncs = []
+    funcBuffers = []
+    classBuffers = []
+    classBuffer = ''
+    className = ''
+    #arguments to infix should be list elements individually
+    listElem = {}
+    dictElem = {}
+    isPerlFunc = False
+
+    reserved = {
+            'if': 'IF',
+            'for': 'FOR',
+            'range': 'RANGE',
+            'in': 'IN',
+            'else': 'ELSE',
+            'elif': 'ELIF',
+            'while': 'WHILE',
+            'print': 'PRINT',
+            'len': 'LEN',
+            'def': 'DEF',
+            'append': 'APPEND',
+            'pop': 'POP',
+            'del' : 'DEL',
+            'input': 'INPUT',
+            'return': 'RETURN',  
+            'importperl': 'IMPORTPERL',
+            'class': 'CLASS',
+            '__init__': 'INIT',
+            'self': 'SELF',
+            }
+
+    tokens = ['ID', 'NUMBER',  'STRING'] + list(reserved.values())
+
+    literals = ['(', ')', ',', ':', '>', '<', '=', '!', "+", "-", "*", "/", "%", "[", "]",".", "{", "}"]
+
+    def __init__(self, filename, outFile = None):    
+        import ply.lex as lex
+        lex.lex(module=self)
+        import ply.yacc as yacc
+        yacc.yacc(module=self)
+        lines = open(filename).read().split('\n')
+        flag = True
+        for line in lines:
+            indent = '' 
+            if line:
+                m = re.match(r'^( +|\t+)', line)
+                if m:
+                    indent = line[ :m.span()[-1]]
+                    line = line[m.span()[-1]:]       
+            
+            if not self.checkIndent(indent) and line:
+                flag = False
+                break
+            yacc.parse(line)
+        if flag:
+            self.execute(outFile)
+
+    #TODO: nesting of functions
+    def checkIndent(self, indent):
+        if self.beginBlock:
+            self.beginBlock = False
+           
+            if not indent:
+                print("Expecting a new block")
+                return False
+
+            #this elif is necessary because the next elif throws an error for empty 
+            #self.indentStack
+            elif self.indentStack == []:
+                self.indentStack.append(indent)
+
+            elif indent[0] != self.indentStack[-1][0]:
+                print("Mixing of spaces and tabs for indentation not allowed")
+                return False 
+
+            elif len(indent) <= len(self.indentStack[-1]):       
+                print("Expecting a new block")
+                return False
+
+            else:
+                self.indentStack.append(indent)
+
+        else:
+            if not indent and not self.indentStack:
+                return True 
+
+            elif not indent and self.indentStack:
+                #TODO:doing this only for functions...do it for others later
+                self.funcBuffer += '.end\n'
+                self.funcBuffers.append(self.funcBuffer)
+                self.funcBuffer = ''
+                self.insideFunc = False
+                self.indentStack = []
+                return True
+            
+            if indent and not self.indentStack:
+                #print("Wrong indentation")
+                return True 
+
+            elif len(indent) > len(self.indentStack[-1]):
+                print("Not expecting a new block")
+                return False
+            
+            elif len(indent) < len(self.indentStack[-1]):
+                if len(self.indentStack) > 1 and indent != self.indentStack[-2]:
+                    print("Improper end of block")
+                    return False
+                else:
+                    tempstr = ''
+                    if self.blockType == 'fornum':
+                        tempstr = '\ninc ' +  self.blockVar  + "\ngoto " + self.loops.pop()[:-2] + "\n" + self.outs.pop()  + '\n' +"end\n"
+                    elif self.blockType == 'foriter':
+                        tempstr = 'goto ' + self.loops.pop()[:-2] + '\n' + self.outs.pop()  + '\n'+"end\n"
+                    elif self.blockType == 'while':
+                        tempstr = 'if ' + self.conditionVar + ' goto ' + self.loops.pop()[:-2] + '\n'
+                    elif self.blockType == 'if':
+                        tempstr = self.outs.pop() + '\n'
+                    elif self.blockType == 'else':
+                        tempstr = self.outs.pop() + '\n'
+                    elif self.blockType == 'func':
+                        self.funcBuffer += '.end\n'
+                        self.funcBuffers.append(self.funcBuffer)
+                        self.funcBuffer = ''
+                        self.insideFunc = False
+                    if tempstr:
+                        self.addToBuffer(tempstr)
+                    self.indentStack.pop()       
+        return True
+
+    def execute(self, outFile):
+        tempstr = ".HLL 'perl6'\n.sub main\n" + self.outsideFuncBuffer + ".end\n" 
+        for func in self.funcBuffers:
+            tempstr += func + '\n'
+        import subprocess
+        if outFile:
+            f = open(outFile, 'w')
+            f.write(tempstr)
+            f.close()
+        else:   
+            f = open('output.pir', 'w')
+            f.write(tempstr)
+            f.close()
+            print(subprocess.getoutput('parrot output.pir'))
+            #print("\noutput.pir succesfully generated..\nUse parrot output.pir to run it!\n ")
+        self.outsideFuncBuffer = ''
+
+    def addToBuffer(self, string):
+        if self.insideFunc:
+            self.funcBuffer += string
+        else:
+            self.outsideFuncBuffer += string
+
+    t_ignore = " \t"
+
+    def t_ID(self, t):
+        r'[a-zA-Z_][a-zA-Z0-9_]*'
+        t.type = self.reserved.get(t.value, 'ID')
+        return t
+
+    def t_NUMBER(self, t):
+        r'[+-]?([0-9]*\.?[0-9]+|[0-9]+)'
+        try:
+            t.value = int(t.value)
+        except ValueError:
+            t.value = float(t.value)
+        return t
+
+    def t_STRING(self, t):
+        r'\'.*\'|\".*\"'
+        return t
+        
+    def t_error(self, t):
+        print("Illegal character '%s'" % t)
+        t.lexer.skip(1)
+
+    def p_statement(self, p):
+        '''
+        statement : input_stmt
+                  | print_stmt
+                  | assign_stmt 
+                  | if_stmt
+                  | while_stmt 
+                  | for_stmt 
+                  | methodcall_stmt
+                  | del_stmt
+                  | funcdef_stmt
+                  | funccall_stmt
+                  | return_stmt
+                  | import_stmt               
+                  | classdef_stmt
+        '''
+    def p_import_stmt(self, p):
+        '''
+        import_stmt : IMPORTPERL ID
+        '''
+        self.perlFuncs.append(p[2])
+        self.addToBuffer("load_bytecode '" + p[2] + ".pir'\n") 
+        self.isPerlFunc = True
+
+    def p_return_stmt(self, p):
+        ''' 
+        return_stmt : RETURN ID
+                    | RETURN NUMBER 
+                    | RETURN STRING
+        '''
+        if self.insideFunc == True:
+            self.funcBuffer += ".return(" + str(p[2]) + ")\n"
+        else:
+            print("Check your return, mate")
+        
+    def p_funccall_stmt(self, p):
+        '''
+        funccall_stmt : ID "(" funccall_param_list ")"
+        '''
+        self.funccallBuffer += "\'" + p[1] + "\'("
+        for param in self.params:
+           self.funccallBuffer += str(param) + ","
+        self.funccallBuffer = self.funccallBuffer[:-1] + ")\n"
+       # self.addToBuffer(self.funccallBuffer)
+       # self.funccallBuffer = ''
+        self.exprType = 'pmc'
+
+    def p_funccall_param_list(self, p):
+        ''' 
+        funccall_param_list :  ID 
+                            | NUMBER 
+                            | STRING
+                            | funccall_param_list "," ID 
+                            | funccall_param_list "," NUMBER
+                            | funccall_param_list "," STRING
+        '''
+        if len(p) == 2:
+            if self.isPerlFunc:
+                if self.idList[p[1]] == 'list ':
+                    tempstr = "$P43='&infix:<,>'("
+                    for elem in self.listElem[p[1]]:
+                        tempstr += str(elem) + ','
+                    tempstr = tempstr[:-1] + ")\n"
+                    self.addToBuffer(tempstr)
+                    self.params.append('$P43')
+                    isPerlFunc = False
+            else:
+                self.params.append(p[1])
+        else:
+            self.params.append(p[3])
+
+    def p_funcdef_stmt(self, p):
+        '''
+        funcdef_stmt : DEF ID "(" param_list ")" ":" 
+                     | DEF ID "(" ")" ":"
+                     | DEF INIT "(" SELF ")" ":"
+                     | DEF ID "(" SELF "," param_list ")" ":"
+                     | DEF ID "(" SELF ")" ":"
+        '''
+        self.insideFunc = True 
+        self.blockType = 'func'
+        self.beginBlock = True
+        if  p[4] == 'self' and p[2] != '__init__':
+            self.funcBuffer += ".namespace ['" + self.className + "']\n" 
+            self.funcBuffer += ".sub " + p[2] + " :method\n"
+        elif p[2] == '__init__':
+            self.funcBuffer += ".namespace ['" + self.className + "']\n" 
+            self.funcBuffer += ".sub init :vtable\n"
+        else:
+            self.funcBuffer += ".sub \'" + p[2] + "\'\n" + self.paramBuffer
+        self.paramBuffer = ''
+        
+    def p_param_list(self, p):
+        '''
+        param_list : ID  
+                   | param_list "," ID 
+                   |
+        '''
+        if len(p) == 2:
+            var = p[1]
+        else:
+            var = p[3]
+        #FIXME: the self.exprType DOES NOT work here
+        self.paramBuffer += ".param pmc "  + var + "\n"
+
+    def p_classdef_stmt(self, p):
+        '''
+        classdef_stmt : CLASS ID ":"
+        '''
+        self.addToBuffer("$P0=newclass '" + p[2] + "'\n") 
+        self.beginBlock = True
+        self.blockType = 'class'
+        self.className = p[2]
+
+
+    '''
+    the simplest input(string) has been handled
+    '''
+    def p_input_stmt(self, p):
+        '''
+        input_stmt : ID "=" INPUT "(" ")"
+        '''   
+        tempstr = '.local string ' + p[1] + '\n'
+        tempstr += '$P0 = getstdin' + '\n'
+        tempstr += p[1] + ' = ' + '$P0."readline"()' + '\n'
+        self.addToBuffer(tempstr)
+
+    def p_print_stmt(self, p):
+        '''
+        print_stmt : PRINT "(" expr ")" 
+                   | PRINT "(" string_expr ")"
+        '''
+        #This is because print(1 + 2) does not seem to work in parrot
+        printBuffer = 'printBuffer' + str(len(self.outsideFuncBuffer))
+        tempstr = '.local ' + self.exprType + printBuffer + '\n'
+        tempstr += printBuffer + ' = ' + self.exprBuffer + '\n'
+        tempstr += 'print ' +  printBuffer + '\n' + 'print "\\n"' + '\n'
+        self.addToBuffer(tempstr)
+
+    def p_expression(self, p):
+        '''
+        expr : NUMBER "+" NUMBER
+             | NUMBER "-" NUMBER
+             | NUMBER "*" NUMBER
+             | NUMBER "/" NUMBER
+             | NUMBER "%" NUMBER
+             | ID "+" ID
+             | ID "-" ID
+             | ID "*" ID
+             | ID "/" ID
+             | ID "%" ID
+             | NUMBER "+" ID 
+             | ID
+             | NUMBER
+             | funccall_stmt
+             | ID "[" STRING "]"
+             | ID "[" NUMBER "]"
+             | SELF "." ID
+        '''
+        #expr is evaluated first before print, hence another buffer is needed
+        if len(p) == 2:
+            self.exprBuffer = str(p[1])     
+
+        else:
+            if p[1] == 'self':
+               tempstr = '.local pmc t42\nt42 = new "String"\n'
+               tempstr += 't42 = getattribute self,"' + p[3]  + '"\n'
+               self.addToBuffer(tempstr)
+               self.exprBuffer = 't42'
+            else:
+                #string concatenation
+                if p[2] == '+' and  self.idList.get(p[1], None) == 'string '  and  self.idList.get(p[3], None) == 'string ':
+                    self.exprBuffer = str(p[1]) + ' . ' + str(p[3])
+                else:        
+                    self.exprBuffer = ''
+                    for tok in p:
+                        if tok == 0 or tok:
+                            self.exprBuffer += str(tok) 
+
+        if type(p[1]) == int:
+            self.exprType = 'int '
+        elif type(p[1]) == float:
+            self.exprType = 'num '
+        elif type(p[1]) == str:
+            self.exprType = 'string '
+        else:
+            self.exprType = 'pmc '
+            self.exprBuffer = self.funccallBuffer
+            
+
+    '''some things don't seem to be working here'''
+    def p_string_expression(self, p):
+        '''
+        string_expr : ID "+" STRING
+                    | STRING "[" NUMBER ":" NUMBER "]"
+                    | STRING "*" NUMBER
+                    | LEN "(" STRING ")" 
+                    | STRING
+        '''
+        self.exprType = 'string '
+        if len(p) == 2:
+            self.exprBuffer = p[1]
+        else:
+            if p[2] == '+':
+                self.exprType = 'pmc '
+                self.exprBuffer  = p[1] + "." + p[3]
+            elif p[2] == '*':
+                self.exprBuffer = 'repeat ' + p[1] + ',' + str(p[3])
+            elif p[1] == 'len':
+                self.exprType = 'int '
+                self.exprBuffer = 'length ' + p[3]
+            elif p[2] == '[':
+                self.exprBuffer = 'substr ' + p[1] + ', ' + str(p[3]) + ', ' + str(p[5] - 1)
+        
+    def p_assign_stmt(self, p):
+        '''
+        assign_stmt : ID "=" expr 
+                    | ID "+" "=" expr
+                    | ID "=" string_expr
+                    | ID "+" "=" string_expr
+                    | ID "-" "=" expr
+                    | ID "*" "=" expr
+                    | ID "/" "=" expr
+                    | ID "%" "=" expr
+                    | ID "=" "[" "]"
+                    | ID "=" LEN "(" ID ")"
+                    | ID "=" "{" "}"
+                    | ID "[" STRING "]" "=" expr
+                    | ID "[" STRING "]" "=" string_expr
+                    | ID "=" ID "(" ")"
+                    | SELF "." ID "=" NUMBER
+                    | SELF "." ID "=" STRING
+        '''
+        tempstr = ''
+        
+        if p[1] == 'self':
+            self.outsideFuncBuffer += "addattribute $P0,'" + p[3] + "'\n"
+            if type(p[5]) == int:
+                typeVar = 'Integer'
+            elif type(p[5]) == str:
+                typeVar = 'String'
+            tempstr += "$P42 = new '" + typeVar + "'\n"
+            tempstr += "$P42 = " + str(p[5]) + "\n"
+            tempstr += "setattribute self,'" + p[3] + "',$P42\n"
+                
+
+        #single object instantiation for now
+        elif len(p) == 6:
+            if p[4] == "(":
+                tempstr = '.local pmc ' + p[1] + "\n"
+                tempstr += p[1] + "=new '" + p[3] + "'\n"
+                self.idList[p[1]] = 'pmc'
+
+        else:  
+             #FIXME
+            if p[1] not in  self.idList.keys() and '[' not in p and '{' not in p and 'len' not in p:
+                tempstr += '.local ' + self.exprType + p[1] + "\n"
+                self.idList[p[1]] = self.exprType
+            if len(p) == 4:
+                tempstr += p[1] + p[2] + self.exprBuffer + "\n"
+            elif p[3] == "[":
+                tempstr += '.local pmc ' + p[1] + "\n"
+                self.idList[p[1]] = 'list '
+                tempstr += p[1] + "=" + 'new "ResizablePMCArray"\n'          
+            elif p[3] == "{":
+                tempstr += '.local pmc ' + p[1] + "\n"
+                self.idList[p[1]] = 'hash '
+                tempstr += "new " + p[1] + ", \"Hash\"\n"
+            #FIXME
+            elif p[3] == 'len':
+                tempstr += '.local int ' + p[1] + "\n"
+                tempstr += p[1] + ' = ' + p[5] + '\n'
+            elif p[2] == '[':
+                tempstr += p[1] + "[" + p[3] + "]" + "=" + self.exprBuffer + '\n' 
+                if p[1] not in self.dictElem:
+                    self.dictElem[p[1]] = [] 
+                self.dictElem[p[1]].append([p[3], self.exprBuffer])
+            elif p[4] == '[':
+                tempstr += '.local pmc ' + p[1] + '\n'
+                tempstr += str(p[1]) + str(p[2]) + str(p[3]) + str(p[4]) + str(p[5]) + str(p[6]) + '\n'
+            else:
+                tempstr += p[1] + p[2] + p[3] + self.exprBuffer + "\n"
+        self.addToBuffer(tempstr)
+
+    def p_if_stmt(self, p):
+        '''
+        if_stmt : IF condition ":"
+                | IF STRING IN ID ":"            
+                | ELIF condition ":"
+                | ELIF STRING IN ID ":"
+                | ELSE ":"
+        '''
+        #TODO: check if else is preceded by if
+        self.beginBlock = True
+        self.blockType = 'if'
+
+        outVar = "OUT" + str(len(self.outsideFuncBuffer)) + ':\n'
+        self.outs.append(outVar)
+        if p[1] == 'else':
+            self.blockType = 'else'
+            newoutVar = "OUT" + str(len(self.outsideFuncBuffer)) + ':\n'
+            self.outsideFuncBuffer = self.outsideFuncBuffer[:self.outsideFuncBuffer.rindex('OUT')] + '\ngoto ' + newoutVar[:-2] + '\n' +  self.outsideFuncBuffer[self.outsideFuncBuffer.rindex('OUT'):] + '\n'
+            self.outs.append(newoutVar)
+        else: 
+            if 'in' in p:
+                self.outsideFuncBuffer += 'exists $I0, ' + p[4] + '[' + p[2] + ']' + '\n'
+                self.outsideFuncBuffer += 'unless $I0 goto ' + outVar[:-2] + '\n' 
+            else:      
+                self.outsideFuncBuffer += 'unless ' + self.conditionVar + ' goto ' + outVar[:-2]  + '\n'
+            
+    def p_while_stmt(self, p):
+        '''
+        while_stmt : WHILE condition ":"
+        '''
+        self.beginBlock = True
+        self.blockType = 'while'
+        
+        loopVar = 'LOOP' + str(len(self.outsideFuncBuffer)) + ":\n"
+        self.loops.append(loopVar)
+        self.outsideFuncBuffer += loopVar 
+
+    def p_for_stmt(self, p):
+        '''
+        for_stmt : FOR ID IN RANGE "(" NUMBER "," NUMBER ")" ":"
+                 | FOR ID IN RANGE "(" NUMBER ")" ":"
+                 | FOR ID IN ID ":"
+        '''
+        self.beginBlock = True 
+        loopVar = 'LOOP' + str(len(self.outsideFuncBuffer)) + ":\n"
+        self.loops.append(loopVar)
+        outVar = 'OUT' + str(len(self.outsideFuncBuffer)) + ':\n'
+        self.outs.append(outVar)
+        if(self.insideFunc ==True):
+            if(len(p) == 6):
+                self.blockType = 'foriter'
+                self.funcBuffer += '$P0 = iter ' + p[4] + '\n'
+                self.funcBuffer += '.local pmc ' + p[2] + '\n'
+                self.funcBuffer += loopVar
+                self.funcBuffer += 'unless $P0 goto ' + outVar[:-2] + '\n'
+                self.funcBuffer += p[2] + '=' + 'shift $P0' + '\n'       
+            
+            else:
+                self.blockType = 'fornum'
+                if(len(p) <= 9):
+                        self.funcBuffer += ".local int " + p[2] +  "\n" + p[2] + " = 0 " + "\n"
+                        maximum = p[6]
+                else :      
+                        self.funcBuffer += ".local int " + p[2] +  "\n" + p[2] + " = " + str(p[6]) + "\n"
+                        maximum = p[8]
+                self.blockVar = p[2]
+                self.funcBuffer += loopVar 
+                self.funcBuffer += "if " + p[2] + " >= " + str(maximum) + " goto " + outVar[:-2] + '\n'
+        else:
+            if(len(p) == 6):
+                self.blockType = 'foriter'
+                self.outsideFuncBuffer += '$P0 = iter ' + p[4] + '\n'
+                self.outsideFuncBuffer += '.local pmc ' + p[2] + '\n'
+                self.outsideFuncBuffer += loopVar
+                self.outsideFuncBuffer += 'unless $P0 goto ' + outVar[:-2] + '\n'
+                self.outsideFuncBuffer += p[2] + '=' + 'shift $P0' + '\n'       
+            else:
+                self.blockType = 'fornum'
+                if(len(p) <= 9):
+                    self.outsideFuncBuffer += ".local int " + p[2] +  "\n" + p[2] + " = 0 " + "\n"
+                    maximum = p[6]
+                else :      
+                    self.outsideFuncBuffer += ".local int " + p[2] +  "\n" + p[2] + " = " + str(p[6]) + "\n"
+                    maximum = p[8]
+                self.blockVar = p[2]
+                self.outsideFuncBuffer += loopVar 
+                self.outsideFuncBuffer += "if " + p[2] + " >= " + str(maximum) + " goto " + outVar[:-2] + '\n'
+        
+    def p_condition(self, p):
+        '''
+        condition : ID opr ID 
+                  | ID opr NUMBER
+                  | NUMBER opr NUMBER               
+        '''
+        self.conditionVar = str(p[1]) + self.conditionOperator + str(p[3])
+        
+    def p_opr(self, p):
+        '''
+        opr : "<" 
+            | ">" 
+            | "<" "=" 
+            | ">" "="
+            | "=" "=" 
+            | "!" "=" 
+        '''
+        if len(p) == 2:
+            self.conditionOperator = p[1]
+        else:
+            self.conditionOperator = p[1] + p[2]
+        
+    def p_methodcall_stmt(self, p):
+        '''
+        methodcall_stmt : ID "." APPEND "(" expr ")"
+                        | ID "." APPEND "(" string_expr ")"
+                        | ID "=" ID "." POP "(" ")"
+                        | ID "." ID "(" ")"
+        '''
+        if p[3] == 'append':
+            tempstr = 'push ' + p[1] + ', ' + self.exprBuffer  + '\n'
+            #for perl
+            if p[1] not in self.listElem: 
+                self.listElem[p[1]] = []
+            self.listElem[p[1]].append(self.exprBuffer)
+        elif p[5]  == 'pop':
+            if p[1] not in self.idList:
+                tempstr = '.local pmc ' + p[1] + '\n'
+                self.idList[p[1]] = 'pmc ' 
+        
+            tempstr += p[1] + ' = ' + 'pop ' + p[3] + '\n'
+        else:
+            tempstr = p[1] + ".'" + p[3] + "'()" + '\n'
+            
+        self.addToBuffer(tempstr)
+
+    def p_del_stmt(self, p):
+        '''
+        del_stmt : DEL ID "[" STRING "]"
+        '''
+        self.addToBuffer('delete ' + p[2] + p[3] + p[4] + p[5] + '\n')
+
+    def p_error(self, p):
+        if p:
+            print("Syntax error at '%s'" % p.value)
+        else:
+            pass
+
+if __name__ == '__main__':
+    if len(sys.argv) == 3:
+        Paranoid(sys.argv[1], sys.argv[2])
+    else:
+        Paranoid(sys.argv[1])
+

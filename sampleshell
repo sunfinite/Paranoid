@@ -1,0 +1,245 @@
+#!/usr/bin/env python
+
+import sys
+import re
+
+if sys.version_info[0] >= 3:
+    raw_input = input
+
+indentStack = []
+beginBlock = False
+blockBuffer = ''
+blockVar = ''
+prompt = '>>> '
+globalAR = {}
+
+def execute():
+    global blockBuffer
+    f = open('temp.pir', 'w')
+    f.write("%s"%".sub main\n" + blockBuffer + "\n.end")
+    f.close()
+    import subprocess
+    print(subprocess.getoutput('parrot temp.pir'))
+    blockBuffer = ''
+
+reserved = {
+        'for': 'FOR',
+        'range': 'RANGE',
+        'in': 'IN',
+        'while': 'WHILE',
+        'print': 'PRINT'
+        }
+
+tokens = ['ID', 'NUMBER',  'STRING'] + list(reserved.values())
+
+literals = ['(', ')', ',', ':', '>', '<', '=', '!']
+
+t_ignore = " \t"
+
+def t_ID(t):
+    r'[a-zA-Z_][a-zA-Z0-9_]*'
+    t.type = reserved.get(t.value, 'ID')
+    return t
+
+def t_NUMBER(t):
+    r'\d+'
+    t.value = int(t.value)
+    return t
+
+def t_STRING(t):
+    r'\'.*\'|\".*\"|\'\'\'.*\'\'\''
+    return t
+    
+def t_error(t):
+    print("Illegal character '%s'" % t)
+    t.lexer.skip(1)
+    
+import ply.lex as lex
+lex.lex()
+
+def p_statement(p):
+    '''
+    statement : print_stmt
+                 | assign_stmt 
+                 | while_stmt 
+                 | for_stmt 
+    '''
+
+def p_expression_print_stmt(p):
+    '''
+    print_stmt : PRINT "(" ID ")" 
+               | PRINT "(" STRING ")"
+               | PRINT "(" NUMBER ")"
+    '''
+
+    global blockBuffer, globalAR
+    
+    blockBuffer += 'print ' + str(globalAR.get(p[3], p[3])) +'\n'
+
+    if prompt == '>>> ':
+        execute()
+        
+def p_expression_assign_stmt(p):
+    '''
+    assign_stmt : ID "=" NUMBER 
+                   | ID "=" ID 
+                   | ID "=" STRING 
+    '''
+    global blockBuffer
+    blockBuffer += p[1] + "=" + str(p[3]) + "\n"
+
+    if prompt == '>>> ':
+        global globalAR
+        globalAR[p[1]] = globalAR.get(p[3], p[3])
+        #FIXME: Should we call execute() here
+        blockBuffer = ''
+        
+
+
+def p_expression_while_stmt(p):
+    '''
+    while_stmt : WHILE condition ":"
+    '''
+    global beginBlock, prompt
+    beginBlock = True
+    prompt = '... '
+    
+    global blockBuffer    
+    blockBuffer += "loop:\n"
+    
+     
+def p_expression_for_stmt(p):
+    '''
+    for_stmt : FOR ID IN RANGE "(" NUMBER "," NUMBER ")" ":"
+                | FOR ID IN RANGE "(" NUMBER ")" ":"
+    '''
+    global beginBlock, prompt
+    beginBlock = True
+    prompt = '... '
+
+    global blockBuffer
+    global blockVar
+    if(len(p) <= 9):
+        blockBuffer += ".local int " + p[2] +  "\n" + p[2] + " = 0 " + "\n"
+        maximum = p[6]
+    else :      
+        blockBuffer += ".local int " + p[2] +  "\n" + p[2] + " = " + str(p[6]) + "\n"
+        maximum = p[8]
+    blockVar = p[2]
+    blockBuffer += "loop:\n"
+    blockBuffer += "if " + p[2] + " >= " + str(maximum) + " goto out\n"
+
+def p_expression_condition(p):
+    '''
+    condition : ID opr ID 
+              | ID opr NUMBER
+              | NUMBER opr NUMBER               
+    '''
+    global blockBuffer
+    blockBuffer += "if "
+    if p[2] == '>':
+        p[2] = '<'
+    else:
+        p[2] = '>'
+    blockBuffer += str(p[1]) + str(p[2]) + str(p[3]) + '\n'
+    
+    
+def p_expression_opr(p) :
+    '''
+    opr : "<" 
+           | ">" 
+           | "<" "=" 
+           | ">" "="
+           | "=" "=" 
+           | "!" "=" 
+    '''
+
+
+def p_error(p):
+    if p:
+        print("Syntax error at '%s'" % p.value)
+    else:
+        print("Syntax error at EOF")
+
+def check_indent(indent):
+    global beginBlock, indentStack, prompt
+    global blockVar, blockBuffer        
+
+    if beginBlock:
+        beginBlock = False
+       
+        if not indent:
+            print("Expecting a new block")
+            return False
+        #if tabs were used for parent block...the same should be used for the child
+        #TODO: looks stupid, improve
+
+        elif indentStack == []:
+            indentStack.append(indent)
+
+        elif indent[0] != indentStack[-1][0]:
+            print("Mixing of spaces and tabs for indentation not allowed")
+            return False 
+
+        #the characters are the same, check for length
+        elif len(indent) <= len(indentStack[-1]):       
+                print("Expecting a new block")
+                return False
+
+        else:
+            indentStack.append(indent)
+
+    else:
+        if not indent and not indentStack:
+            return True 
+
+        elif not indent:
+        #break out of nested loops on getting a newline
+            indentStack = []
+            prompt = '>>> '
+            blockBuffer += 'print "\\n"\ninc ' +  blockVar  + "\ngoto loop\n" + "out:\n"+"end"
+            execute()
+            return True
+
+        if indent and not indentStack:
+            print("Wrong indentation")
+            return False
+
+        elif len(indent) > len(indentStack[-1]):
+            print("Not expecting a new block")
+            return False
+        
+        elif len(indent) < len(indentStack[-1]):
+            if len(indentStack) == 1:
+                prompt = '>>> '
+
+            if len(indentStack) > 1 and indent != indentStack[-2]:
+                    print("Improper end of block")
+                    return False
+            else:
+                    indentStack.pop()       
+    return True
+
+import ply.yacc as yacc
+yacc.yacc()
+
+print('''Test Prompt''')
+while True:
+    line = raw_input(prompt)
+    #temp = re.sub(r'( +|\t+)(\w.*)', lambda m: m.group(1), line).split('\n')
+    m = re.match(r'^( +|\t+)', line)
+    indent = '' 
+    if m:
+        indent = line[ :m.span()[-1]]
+        line = line[m.span()[-1]:]       
+    
+    if check_indent(indent):
+        if line == 'die':   
+            break
+
+        if line: 
+            yacc.parse(line)
+    else:
+        prompt = '>>> '
+
+
