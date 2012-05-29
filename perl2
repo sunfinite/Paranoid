@@ -2,7 +2,7 @@
 import sys
 import subprocess
 
-tempstr = open(sys.argv[2]).read()
+tempstr = open(sys.argv[1]).read()
 templist = tempstr.split('\n')
 pythonFunc = templist[0].split()[1]
 templist = templist[1:]
@@ -20,8 +20,8 @@ for index, line in enumerate(templist):
         break
 tempstr = '\n'.join(templist)
  
-if len(sys.argv) == 4:
-    f = open(sys.argv[3], 'w')
+if len(sys.argv) == 3:
+    f = open(sys.argv[2], 'w')
     f.write(tempstr)
     f.close()
 else:
