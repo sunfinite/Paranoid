@@ -23,7 +23,7 @@ class Paranoid:
     idList = {} 
     loops = [] 
     outs = [] 
-    blockType = ''
+    blockType = []
     conditionOperator = None
     conditionVar = None
     funccallBuffer = ''
@@ -81,14 +81,17 @@ class Paranoid:
                     indent = line[ :m.span()[-1]]
                     line = line[m.span()[-1]:]       
             
-            if not self.checkIndent(indent) and line:
-                flag = False
-                break
+            if line: 
+                if not self.checkIndent(indent):
+                    flag = False
+                    break
             yacc.parse(line)
         if flag:
+            if self.blockType:
+                self.endBlock()
             self.execute(outFile)
 
-    #TODO: nesting of functions
+    #TODO: nesting of almost everything 
     def checkIndent(self, indent):
         if self.beginBlock:
             self.beginBlock = False
@@ -118,17 +121,13 @@ class Paranoid:
                 return True 
 
             elif not indent and self.indentStack:
-                #TODO:doing this only for functions...do it for others later
-                self.funcBuffer += '.end\n'
-                self.funcBuffers.append(self.funcBuffer)
-                self.funcBuffer = ''
-                self.insideFunc = False
+                self.endBlock()
                 self.indentStack = []
                 return True
             
             if indent and not self.indentStack:
-                #print("Wrong indentation")
-                return True 
+                print("Wrong indentation")
+                return False 
 
             elif len(indent) > len(self.indentStack[-1]):
                 print("Not expecting a new block")
@@ -139,26 +138,35 @@ class Paranoid:
                     print("Improper end of block")
                     return False
                 else:
-                    tempstr = ''
-                    if self.blockType == 'fornum':
-                        tempstr = '\ninc ' +  self.blockVar  + "\ngoto " + self.loops.pop()[:-2] + "\n" + self.outs.pop()  + '\n' +"end\n"
-                    elif self.blockType == 'foriter':
-                        tempstr = 'goto ' + self.loops.pop()[:-2] + '\n' + self.outs.pop()  + '\n'+"end\n"
-                    elif self.blockType == 'while':
-                        tempstr = 'if ' + self.conditionVar + ' goto ' + self.loops.pop()[:-2] + '\n'
-                    elif self.blockType == 'if':
-                        tempstr = self.outs.pop() + '\n'
-                    elif self.blockType == 'else':
-                        tempstr = self.outs.pop() + '\n'
-                    elif self.blockType == 'func':
-                        self.funcBuffer += '.end\n'
-                        self.funcBuffers.append(self.funcBuffer)
-                        self.funcBuffer = ''
-                        self.insideFunc = False
-                    if tempstr:
-                        self.addToBuffer(tempstr)
+                    self.endBlock()
                     self.indentStack.pop()       
         return True
+    
+    def endBlock(self):
+        tempstr = ''
+        curBlockType = self.blockType.pop()
+
+        if curBlockType == 'fornum':
+            tempstr = '\ninc ' +  self.blockVar  + "\ngoto " + self.loops.pop()[:-2] + "\n" + self.outs.pop()  + '\n' 
+
+        elif curBlockType == 'foriter':
+            tempstr = 'goto ' + self.loops.pop()[:-2] + '\n' + self.outs.pop()  + '\n'
+        elif curBlockType == 'while':
+            tempstr = 'if ' + self.conditionVar + ' goto ' + self.loops.pop()[:-2] + '\n'
+        elif curBlockType == 'if':
+            tempstr = self.outs.pop() + '\n'
+
+        elif curBlockType == 'else':
+            tempstr = self.outs.pop() + '\n'
+            self.blockType.pop() #Pop the corresponding if too
+
+        elif curBlockType == 'func':
+            self.funcBuffer += '.end\n'
+            self.funcBuffers.append(self.funcBuffer)
+            self.funcBuffer = ''
+            self.insideFunc = False
+        if tempstr:
+            self.addToBuffer(tempstr)
 
     def execute(self, outFile):
         tempstr = ".HLL 'perl6'\n.sub main\n" + self.outsideFuncBuffer + ".end\n" 
@@ -174,7 +182,6 @@ class Paranoid:
             f.write(tempstr)
             f.close()
             print(subprocess.getoutput('parrot output.pir'))
-            #print("\noutput.pir succesfully generated..\nUse parrot output.pir to run it!\n ")
         self.outsideFuncBuffer = ''
 
     def addToBuffer(self, string):
@@ -222,6 +229,7 @@ class Paranoid:
                   | import_stmt               
                   | classdef_stmt
         '''
+
     def p_import_stmt(self, p):
         '''
         import_stmt : IMPORTPERL ID
@@ -249,8 +257,6 @@ class Paranoid:
         for param in self.params:
            self.funccallBuffer += str(param) + ","
         self.funccallBuffer = self.funccallBuffer[:-1] + ")\n"
-       # self.addToBuffer(self.funccallBuffer)
-       # self.funccallBuffer = ''
         self.exprType = 'pmc'
 
     def p_funccall_param_list(self, p):
@@ -286,7 +292,7 @@ class Paranoid:
                      | DEF ID "(" SELF ")" ":"
         '''
         self.insideFunc = True 
-        self.blockType = 'func'
+        self.blockType.append('func')
         self.beginBlock = True
         if  p[4] == 'self' and p[2] != '__init__':
             self.funcBuffer += ".namespace ['" + self.className + "']\n" 
@@ -317,7 +323,7 @@ class Paranoid:
         '''
         self.addToBuffer("$P0=newclass '" + p[2] + "'\n") 
         self.beginBlock = True
-        self.blockType = 'class'
+        self.blockType.append('class')
         self.className = p[2]
 
 
@@ -383,7 +389,7 @@ class Paranoid:
                     self.exprBuffer = ''
                     for tok in p:
                         if tok == 0 or tok:
-                            self.exprBuffer += str(tok) 
+                            self.exprBuffer += ' ' + str(tok) 
 
         if type(p[1]) == int:
             self.exprType = 'int '
@@ -500,12 +506,12 @@ class Paranoid:
         '''
         #TODO: check if else is preceded by if
         self.beginBlock = True
-        self.blockType = 'if'
+        self.blockType.append('if')
 
         outVar = "OUT" + str(len(self.outsideFuncBuffer)) + ':\n'
         self.outs.append(outVar)
         if p[1] == 'else':
-            self.blockType = 'else'
+            self.blockType.append('else')
             newoutVar = "OUT" + str(len(self.outsideFuncBuffer)) + ':\n'
             self.outsideFuncBuffer = self.outsideFuncBuffer[:self.outsideFuncBuffer.rindex('OUT')] + '\ngoto ' + newoutVar[:-2] + '\n' +  self.outsideFuncBuffer[self.outsideFuncBuffer.rindex('OUT'):] + '\n'
             self.outs.append(newoutVar)
@@ -521,7 +527,7 @@ class Paranoid:
         while_stmt : WHILE condition ":"
         '''
         self.beginBlock = True
-        self.blockType = 'while'
+        self.blockType.append('while')
         
         loopVar = 'LOOP' + str(len(self.outsideFuncBuffer)) + ":\n"
         self.loops.append(loopVar)
@@ -540,7 +546,7 @@ class Paranoid:
         self.outs.append(outVar)
         if(self.insideFunc ==True):
             if(len(p) == 6):
-                self.blockType = 'foriter'
+                self.blockType.append('foriter')
                 self.funcBuffer += '$P0 = iter ' + p[4] + '\n'
                 self.funcBuffer += '.local pmc ' + p[2] + '\n'
                 self.funcBuffer += loopVar
@@ -548,7 +554,7 @@ class Paranoid:
                 self.funcBuffer += p[2] + '=' + 'shift $P0' + '\n'       
             
             else:
-                self.blockType = 'fornum'
+                self.blockType.append('fornum')
                 if(len(p) <= 9):
                         self.funcBuffer += ".local int " + p[2] +  "\n" + p[2] + " = 0 " + "\n"
                         maximum = p[6]
@@ -560,14 +566,14 @@ class Paranoid:
                 self.funcBuffer += "if " + p[2] + " >= " + str(maximum) + " goto " + outVar[:-2] + '\n'
         else:
             if(len(p) == 6):
-                self.blockType = 'foriter'
+                self.blockType.append('foriter')
                 self.outsideFuncBuffer += '$P0 = iter ' + p[4] + '\n'
                 self.outsideFuncBuffer += '.local pmc ' + p[2] + '\n'
                 self.outsideFuncBuffer += loopVar
                 self.outsideFuncBuffer += 'unless $P0 goto ' + outVar[:-2] + '\n'
                 self.outsideFuncBuffer += p[2] + '=' + 'shift $P0' + '\n'       
             else:
-                self.blockType = 'fornum'
+                self.blockType.append('fornum')
                 if(len(p) <= 9):
                     self.outsideFuncBuffer += ".local int " + p[2] +  "\n" + p[2] + " = 0 " + "\n"
                     maximum = p[6]
